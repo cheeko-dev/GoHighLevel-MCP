@@ -1,330 +1,151 @@
-// ChatGPT-compliant MCP Server for GoHighLevel
-// Implements strict MCP 2024-11-05 protocol requirements
-
+const https = require('https');
 const MCP_PROTOCOL_VERSION = "2024-11-05";
-
-// Server information - ChatGPT requires specific format
-const SERVER_INFO = {
-  name: "ghl-mcp-server",
-  version: "1.0.0"
-};
-
-// Only these tool names work with ChatGPT
-const TOOLS = [
-  {
-    name: "search",
-    description: "Search for information in GoHighLevel CRM system",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "Search query for GoHighLevel data"
-        }
-      },
-      required: ["query"]
-    }
-  },
-  {
-    name: "retrieve",
-    description: "Retrieve specific data from GoHighLevel",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: {
-          type: "string",
-          description: "ID of the item to retrieve"
-        },
-        type: {
-          type: "string",
-          enum: ["contact", "conversation", "blog"],
-          description: "Type of item to retrieve"
-        }
-      },
-      required: ["id", "type"]
-    }
-  }
-];
+const GHL_BASE_URL = process.env.GHL_BASE_URL || 'https://services.leadconnectorhq.com';
+const GHL_API_KEY = process.env.GHL_API_KEY;
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID;
 
 function log(message, data = null) {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] [MCP] ${message}${data ? ': ' + JSON.stringify(data) : ''}`);
+  console.error(`[${new Date().toISOString()}] [MCP] ${message}${data ? ': ' + JSON.stringify(data) : ''}`);
 }
-
-// Create proper JSON-RPC 2.0 response
 function createJsonRpcResponse(id, result = null, error = null) {
-  const response = {
-    jsonrpc: "2.0",
-    id: id
-  };
-  
-  if (error) {
-    response.error = error;
-  } else {
-    response.result = result;
-  }
-  
+  const response = { jsonrpc: "2.0", id };
+  if (error) response.error = error;
+  else response.result = result;
   return response;
 }
-
-// Create proper JSON-RPC 2.0 notification
 function createJsonRpcNotification(method, params = {}) {
-  return {
-    jsonrpc: "2.0",
-    method: method,
-    params: params
-  };
+  return { jsonrpc: "2.0", method, params };
 }
-
-// Handle MCP initialize request
-function handleInitialize(request) {
-  log("Handling initialize request", request.params);
-  
-  return createJsonRpcResponse(request.id, {
-    protocolVersion: MCP_PROTOCOL_VERSION,
-    capabilities: {
-      tools: {}
-    },
-    serverInfo: SERVER_INFO
-  });
-}
-
-// Handle tools/list request
-function handleToolsList(request) {
-  log("Handling tools/list request");
-  
-  return createJsonRpcResponse(request.id, {
-    tools: TOOLS
-  });
-}
-
-// Handle tools/call request
-function handleToolsCall(request) {
-  const { name, arguments: args } = request.params;
-  log("Handling tools/call request", { tool: name, args });
-  
-  let content;
-  
-  if (name === "search") {
-    content = [
-      {
-        type: "text",
-        text: `GoHighLevel Search Results for: "${args.query}"\n\n✅ Found Results:\n• Contact: John Doe (john@example.com)\n• Contact: Jane Smith (jane@example.com)\n• Conversation: "Follow-up call scheduled"\n• Blog Post: "How to Generate More Leads"\n\n📊 Search completed successfully in GoHighLevel CRM.`
+function ghlRequest(method, path, body = null) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(GHL_BASE_URL + path);
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method: method,
+      headers: {
+        'Authorization': `Bearer ${GHL_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Version': '2021-07-28',
+        'Accept': 'application/json'
       }
-    ];
-  } else if (name === "retrieve") {
-    content = [
-      {
-        type: "text", 
-        text: `GoHighLevel ${args.type} Retrieved: ID ${args.id}\n\n📄 Details:\n• Name: Sample ${args.type}\n• Status: Active\n• Last Updated: ${new Date().toISOString()}\n• Source: GoHighLevel CRM\n\n✅ Data retrieved successfully from GoHighLevel.`
-      }
-    ];
-  } else {
-    return createJsonRpcResponse(request.id, null, {
-      code: -32601,
-      message: `Method not found: ${name}`
-    });
-  }
-  
-  return createJsonRpcResponse(request.id, {
-    content: content
-  });
-}
-
-// Handle ping request (required by MCP protocol)
-function handlePing(request) {
-  log("Handling ping request");
-  return createJsonRpcResponse(request.id, {});
-}
-
-// Process JSON-RPC message
-function processJsonRpcMessage(message) {
-  try {
-    log("Processing JSON-RPC message", { method: message.method, id: message.id });
-    
-    // Validate JSON-RPC format
-    if (message.jsonrpc !== "2.0") {
-      return createJsonRpcResponse(message.id, null, {
-        code: -32600,
-        message: "Invalid Request: jsonrpc must be '2.0'"
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, data: JSON.parse(data) }); }
+        catch (e) { resolve({ status: res.statusCode, data: data }); }
       });
-    }
-    
-    switch (message.method) {
-      case "initialize":
-        return handleInitialize(message);
-      case "tools/list":
-        return handleToolsList(message);
-      case "tools/call":
-        return handleToolsCall(message);
-      case "ping":
-        return handlePing(message);
-      default:
-        return createJsonRpcResponse(message.id, null, {
-          code: -32601,
-          message: `Method not found: ${message.method}`
-        });
-    }
-  } catch (error) {
-    log("Error processing message", error.message);
-    return createJsonRpcResponse(message.id, null, {
-      code: -32603,
-      message: "Internal error",
-      data: error.message
     });
-  }
+    req.on('error', reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
 }
-
-// Send Server-Sent Event
-function sendSSE(res, data) {
+const TOOLS = [
+  { name: "search_contacts", description: "Search contacts in GoHighLevel by name, email, or phone", inputSchema: { type: "object", properties: { query: { type: "string" }, limit: { type: "number" } }, required: ["query"] } },
+  { name: "get_contact", description: "Get a specific contact by ID", inputSchema: { type: "object", properties: { contactId: { type: "string" } }, required: ["contactId"] } },
+  { name: "create_contact", description: "Create a new contact in GoHighLevel", inputSchema: { type: "object", properties: { firstName: { type: "string" }, lastName: { type: "string" }, email: { type: "string" }, phone: { type: "string" }, tags: { type: "array", items: { type: "string" } }, customFields: { type: "array", items: { type: "object" } } } } },
+  { name: "update_contact", description: "Update an existing contact", inputSchema: { type: "object", properties: { contactId: { type: "string" }, firstName: { type: "string" }, lastName: { type: "string" }, email: { type: "string" }, phone: { type: "string" }, tags: { type: "array", items: { type: "string" } }, customFields: { type: "array", items: { type: "object" } } }, required: ["contactId"] } },
+  { name: "add_tags", description: "Add tags to a contact", inputSchema: { type: "object", properties: { contactId: { type: "string" }, tags: { type: "array", items: { type: "string" } } }, required: ["contactId", "tags"] } },
+  { name: "create_note", description: "Add a note to a contact", inputSchema: { type: "object", properties: { contactId: { type: "string" }, body: { type: "string" } }, required: ["contactId", "body"] } },
+  { name: "get_pipelines", description: "Get all pipelines in GoHighLevel", inputSchema: { type: "object", properties: {} } },
+  { name: "create_opportunity", description: "Create a new opportunity in a pipeline", inputSchema: { type: "object", properties: { pipelineId: { type: "string" }, pipelineStageId: { type: "string" }, contactId: { type: "string" }, name: { type: "string" }, monetaryValue: { type: "number" }, status: { type: "string" } }, required: ["pipelineId", "pipelineStageId", "contactId", "name"] } },
+  { name: "search_opportunities", description: "Search opportunities in GoHighLevel", inputSchema: { type: "object", properties: { pipelineId: { type: "string" }, query: { type: "string" }, status: { type: "string" } } } },
+  { name: "update_opportunity_stage", description: "Move an opportunity to a different stage", inputSchema: { type: "object", properties: { opportunityId: { type: "string" }, pipelineStageId: { type: "string" }, status: { type: "string" } }, required: ["opportunityId"] } },
+  { name: "get_custom_fields", description: "Get all custom fields for contacts", inputSchema: { type: "object", properties: {} } },
+  { name: "create_custom_field", description: "Create a custom field in GoHighLevel", inputSchema: { type: "object", properties: { name: { type: "string" }, fieldKey: { type: "string" }, dataType: { type: "string" }, options: { type: "array", items: { type: "object" } } }, required: ["name", "fieldKey", "dataType"] } },
+  { name: "get_tags", description: "Get all tags in the location", inputSchema: { type: "object", properties: {} } },
+  { name: "create_tag", description: "Create a new tag in GoHighLevel", inputSchema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } },
+  { name: "get_workflows", description: "Get all workflows in GoHighLevel", inputSchema: { type: "object", properties: {} } },
+  { name: "get_calendars", description: "Get all calendars in GoHighLevel", inputSchema: { type: "object", properties: {} } },
+  { name: "create_calendar", description: "Create a new calendar", inputSchema: { type: "object", properties: { name: { type: "string" }, description: { type: "string" } }, required: ["name"] } },
+  { name: "send_sms", description: "Send an SMS to a contact", inputSchema: { type: "object", properties: { contactId: { type: "string" }, message: { type: "string" } }, required: ["contactId", "message"] } },
+  { name: "send_email", description: "Send an email to a contact", inputSchema: { type: "object", properties: { contactId: { type: "string" }, subject: { type: "string" }, body: { type: "string" } }, required: ["contactId", "subject", "body"] } },
+  { name: "get_location", description: "Get current GoHighLevel location details", inputSchema: { type: "object", properties: {} } },
+  { name: "add_contact_to_workflow", description: "Add a contact to a workflow", inputSchema: { type: "object", properties: { contactId: { type: "string" }, workflowId: { type: "string" } }, required: ["contactId", "workflowId"] } }
+];
+async function handleToolCall(name, args) {
   try {
-    const message = typeof data === 'string' ? data : JSON.stringify(data);
-    res.write(`data: ${message}\n\n`);
-    log("Sent SSE message", { type: typeof data });
-  } catch (error) {
-    log("Error sending SSE", error.message);
-  }
+    switch (name) {
+      case "get_location": { const r = await ghlRequest('GET', `/locations/${GHL_LOCATION_ID}`); return JSON.stringify(r.data, null, 2); }
+      case "search_contacts": { const r = await ghlRequest('GET', `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(args.query)}&limit=${args.limit||20}`); return JSON.stringify(r.data, null, 2); }
+      case "get_contact": { const r = await ghlRequest('GET', `/contacts/${args.contactId}`); return JSON.stringify(r.data, null, 2); }
+      case "create_contact": { const r = await ghlRequest('POST', `/contacts/`, { ...args, locationId: GHL_LOCATION_ID }); return JSON.stringify(r.data, null, 2); }
+      case "update_contact": { const { contactId, ...d } = args; const r = await ghlRequest('PUT', `/contacts/${contactId}`, d); return JSON.stringify(r.data, null, 2); }
+      case "add_tags": { const r = await ghlRequest('POST', `/contacts/${args.contactId}/tags`, { tags: args.tags }); return JSON.stringify(r.data, null, 2); }
+      case "create_note": { const r = await ghlRequest('POST', `/contacts/${args.contactId}/notes`, { body: args.body, userId: '' }); return JSON.stringify(r.data, null, 2); }
+      case "get_pipelines": { const r = await ghlRequest('GET', `/opportunities/pipelines/?locationId=${GHL_LOCATION_ID}`); return JSON.stringify(r.data, null, 2); }
+      case "create_opportunity": { const r = await ghlRequest('POST', `/opportunities/`, { ...args, locationId: GHL_LOCATION_ID }); return JSON.stringify(r.data, null, 2); }
+      case "search_opportunities": { let p = `/opportunities/search/?location_id=${GHL_LOCATION_ID}`; if(args.pipelineId) p+=`&pipeline_id=${args.pipelineId}`; if(args.query) p+=`&query=${encodeURIComponent(args.query)}`; if(args.status) p+=`&status=${args.status}`; const r = await ghlRequest('GET', p); return JSON.stringify(r.data, null, 2); }
+      case "update_opportunity_stage": { const b = {}; if(args.pipelineStageId) b.pipelineStageId=args.pipelineStageId; if(args.status) b.status=args.status; const r = await ghlRequest('PUT', `/opportunities/${args.opportunityId}`, b); return JSON.stringify(r.data, null, 2); }
+      case "get_custom_fields": { const r = await ghlRequest('GET', `/locations/${GHL_LOCATION_ID}/customFields`); return JSON.stringify(r.data, null, 2); }
+      case "create_custom_field": { const b = { name: args.name, fieldKey: args.fieldKey, dataType: args.dataType, locationId: GHL_LOCATION_ID }; if(args.options) b.options=args.options; const r = await ghlRequest('POST', `/locations/${GHL_LOCATION_ID}/customFields`, b); return JSON.stringify(r.data, null, 2); }
+      case "get_tags": { const r = await ghlRequest('GET', `/locations/${GHL_LOCATION_ID}/tags`); return JSON.stringify(r.data, null, 2); }
+      case "create_tag": { const r = await ghlRequest('POST', `/locations/${GHL_LOCATION_ID}/tags`, { name: args.name }); return JSON.stringify(r.data, null, 2); }
+      case "get_workflows": { const r = await ghlRequest('GET', `/workflows/?locationId=${GHL_LOCATION_ID}`); return JSON.stringify(r.data, null, 2); }
+      case "get_calendars": { const r = await ghlRequest('GET', `/calendars/?locationId=${GHL_LOCATION_ID}`); return JSON.stringify(r.data, null, 2); }
+      case "create_calendar": { const r = await ghlRequest('POST', `/calendars/`, { ...args, locationId: GHL_LOCATION_ID }); return JSON.stringify(r.data, null, 2); }
+      case "send_sms": { const c = await ghlRequest('POST', `/conversations/`, { locationId: GHL_LOCATION_ID, contactId: args.contactId }); const cid = c.data?.conversation?.id; if(!cid) return `No conversation: ${JSON.stringify(c.data)}`; const r = await ghlRequest('POST', `/conversations/messages`, { type: 'SMS', conversationId: cid, message: args.message }); return JSON.stringify(r.data, null, 2); }
+      case "send_email": { const c = await ghlRequest('POST', `/conversations/`, { locationId: GHL_LOCATION_ID, contactId: args.contactId }); const cid = c.data?.conversation?.id; if(!cid) return `No conversation: ${JSON.stringify(c.data)}`; const r = await ghlRequest('POST', `/conversations/messages`, { type: 'Email', conversationId: cid, subject: args.subject, html: args.body, emailFrom: 'hello@musichabitat.com' }); return JSON.stringify(r.data, null, 2); }
+      case "add_contact_to_workflow": { const r = await ghlRequest('POST', `/contacts/${args.contactId}/workflow/${args.workflowId}`, {}); return JSON.stringify(r.data, null, 2); }
+      default: return `Unknown tool: ${name}`;
+    }
+  } catch(err) { return `Error: ${err.message}`; }
 }
-
-// Set CORS headers
 function setCORSHeaders(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Authorization');
-  res.setHeader('Access-Control-Max-Age', '86400');
 }
-
-// Main request handler - Node.js style export
+function sendSSE(res, data) {
+  try { res.write(`data: ${typeof data === 'string' ? data : JSON.stringify(data)}\n\n`); } catch(e) {}
+}
 module.exports = async (req, res) => {
-  const timestamp = new Date().toISOString();
-  log(`${req.method} ${req.url}`);
-  log(`User-Agent: ${req.headers['user-agent']}`);
-  
-  // Set CORS headers
   setCORSHeaders(res);
-  
-  // Handle preflight
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+  if (req.url === '/' || req.url === '/health') {
+    res.status(200).json({ status: 'healthy', server: 'ghl-mcp-server', version: '2.0.0', protocol: MCP_PROTOCOL_VERSION, timestamp: new Date().toISOString(), tools: TOOLS.map(t=>t.name), endpoint: '/sse', locationId: GHL_LOCATION_ID, hasApiKey: !!GHL_API_KEY });
     return;
   }
-  
-  // Health check
-  if (req.url === '/health' || req.url === '/') {
-    log("Health check requested");
-    res.status(200).json({
-      status: 'healthy',
-      server: SERVER_INFO.name,
-      version: SERVER_INFO.version,
-      protocol: MCP_PROTOCOL_VERSION,
-      timestamp: timestamp,
-      tools: TOOLS.map(t => t.name),
-      endpoint: '/sse'
-    });
-    return;
-  }
-  
-  // Favicon handling
-  if (req.url?.includes('favicon')) {
-    res.status(404).end();
-    return;
-  }
-  
-  // MCP SSE endpoint
+  if (req.url?.includes('favicon')) { res.status(404).end(); return; }
   if (req.url === '/sse') {
-    log("MCP SSE endpoint requested");
-    
-    // Set SSE headers
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Content-Type, Accept',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
-    });
-    
-    // Handle GET (SSE connection)
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'Access-Control-Allow-Origin': '*' });
     if (req.method === 'GET') {
-      log("SSE connection established");
-      
-      // Send immediate initialization notification
-      const initNotification = createJsonRpcNotification("notification/initialized", {});
-      sendSSE(res, initNotification);
-      
-      // Send tools available notification
-      setTimeout(() => {
-        const toolsNotification = createJsonRpcNotification("notification/tools/list_changed", {});
-        sendSSE(res, toolsNotification);
-      }, 100);
-      
-      // Keep-alive heartbeat every 25 seconds (well under Vercel's 60s limit)
-      const heartbeat = setInterval(() => {
-        res.write(': heartbeat\n\n');
-      }, 25000);
-      
-      // Cleanup on connection close
-      req.on('close', () => {
-        log("SSE connection closed");
-        clearInterval(heartbeat);
-      });
-      
-      req.on('error', (error) => {
-        log("SSE connection error", error.message);
-        clearInterval(heartbeat);
-      });
-      
-      // Auto-close after 50 seconds to prevent Vercel timeout
-      setTimeout(() => {
-        log("SSE connection auto-closing before timeout");
-        clearInterval(heartbeat);
-        res.end();
-      }, 50000);
-      
+      sendSSE(res, { jsonrpc: "2.0", method: "notification/initialized", params: {} });
+      setTimeout(() => sendSSE(res, { jsonrpc: "2.0", method: "notification/tools/list_changed", params: {} }), 100);
+      const hb = setInterval(() => res.write(': heartbeat\n\n'), 25000);
+      req.on('close', () => clearInterval(hb));
+      setTimeout(() => { clearInterval(hb); res.end(); }, 50000);
       return;
     }
-    
-    // Handle POST (JSON-RPC messages)
     if (req.method === 'POST') {
-      log("Processing JSON-RPC POST request");
-      
       let body = '';
-      req.on('data', chunk => {
-        body += chunk.toString();
-      });
-      
-      req.on('end', () => {
+      req.on('data', chunk => body += chunk.toString());
+      req.on('end', async () => {
         try {
-          log("Received POST body", body);
-          const message = JSON.parse(body);
-          const response = processJsonRpcMessage(message);
-          
-          log("Sending JSON-RPC response", response);
-          
-          // Send as SSE for MCP protocol compliance
+          const msg = JSON.parse(body);
+          let response;
+          if (msg.jsonrpc !== '2.0') { response = { jsonrpc: "2.0", id: msg.id, error: { code: -32600, message: 'Invalid Request' } }; }
+          else {
+            switch(msg.method) {
+              case 'initialize': response = { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'ghl-mcp-server', version: '2.0.0' } } }; break;
+              case 'tools/list': response = { jsonrpc: "2.0", id: msg.id, result: { tools: TOOLS } }; break;
+              case 'tools/call': const result = await handleToolCall(msg.params.name, msg.params.arguments||{}); response = { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: 'text', text: result }] } }; break;
+              case 'ping': response = { jsonrpc: "2.0", id: msg.id, result: {} }; break;
+              default: response = { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } };
+            }
+          }
           sendSSE(res, response);
-          
-          // Close connection after response
-          setTimeout(() => {
-            res.end();
-          }, 100);
-          
-        } catch (error) {
-          log("JSON parse error", error.message);
-          const errorResponse = createJsonRpcResponse(null, null, {
-            code: -32700,
-            message: "Parse error"
-          });
-          sendSSE(res, errorResponse);
+          setTimeout(() => res.end(), 100);
+        } catch(e) {
+          sendSSE(res, { jsonrpc: "2.0", id: null, error: { code: -32700, message: 'Parse error' } });
           res.end();
         }
       });
-      
       return;
     }
   }
-  
-  // Default 404
-  log("Unknown endpoint", req.url);
   res.status(404).json({ error: 'Not found' });
-}; 
+};
